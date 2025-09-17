@@ -24,9 +24,9 @@ import folium
 # =========================
 # Tunables
 # =========================
-MAP_HEIGHT = 900            # 지도 세로(px)
-LEFT_COL_RATIO = 0.24       # 좌측 컨트롤 폭
-RIGHT_COL_RATIO = 0.76      # 우측(지도+하단) 폭
+MAP_HEIGHT = 820            # 지도 세로(px)
+LEFT_COL_RATIO = 0.28       # 좌측 컨트롤 폭
+RIGHT_COL_RATIO = 0.72      # 우측(지도 영역) 폭
 
 # 시작 배지 스타일
 BADGE_BORDER_PX = 3
@@ -523,8 +523,11 @@ def _popup_html(t: Dict[str, Any]) -> str:
         if title_txt:
             query += f"&title={quote(title_txt, safe='')}"
         open_script = (
-            "const base=window.location.origin+window.location.pathname;"
-            f"window.open(base+'{query}', '_blank','noopener,noreferrer');return false;"
+            "const parentWin=window.parent||window;"
+            "const loc=parentWin.location;"
+            "const hashPart=loc.hash?loc.hash.split('?')[0]:'';"
+            "const base=loc.origin+loc.pathname+hashPart;"
+            f"parentWin.open(base+'{query}', '_blank','noopener,noreferrer');return false;"
         )
         onclick_attr = html.escape(open_script, quote=True)
         img_line = (
@@ -810,8 +813,8 @@ if handle_image_preview_request():
 # 상단·하단 여백 보정 (제목 잘림 방지 + 전체 화면에 컴팩트)
 st.markdown(f"""
 <style>
-.block-container {{ padding-top: 1.0rem; padding-bottom: 0.3rem; }}
-.block-container h2:first-child {{ margin-top: 0.25rem; }}
+.block-container {{ padding-top: 1.2rem; padding-bottom: 0.2rem; }}
+.block-container h2:first-child {{ margin-top: 1.2rem; }}
 .stMultiSelect [data-baseweb="tag"] {{ max-width: 140px; }}
 /* Legend 영역 스크롤 박스 */
 .legend-box {{
@@ -826,180 +829,104 @@ st.markdown("## 해양 포유류 탐지 뷰어")
 
 col_ctrl, col_main = st.columns([LEFT_COL_RATIO, RIGHT_COL_RATIO], gap="large")
 
-# ---- 좌측 컨트롤 ----
-with col_ctrl:
-    st.markdown("### 설정")
-    st.caption("메타데이터 폴더 선택 후 영상과 객체를 고르세요.")
-    md_dir = st.text_input("메타데이터 폴더", value=str(DEFAULT_METADATA_DIR))
-    if st.button("🔄 JSON 다시 불러오기 (캐시 초기화)"):
-        load_jsons.clear(); build_objects.clear()
-
+md_dir = str(DEFAULT_METADATA_DIR)
 records = load_jsons(md_dir)
 objects_catalog, file_to_labels = build_objects(records)
 
 file_list = sorted(file_to_labels.keys())
-total_files = len(file_list)
-total_objects = len(objects_catalog)
+default_video_sel = file_list.copy()
 
+# ---- 좌측 컨트롤 ----
 with col_ctrl:
-    st.markdown("#### 선택")
-    st.write("**영상 목록**")
+    st.markdown("### 영상 목록")
     ba, bb, _sp = st.columns([2, 4, 13], gap="small")
     with ba:
         all_v = st.button("전체", key="btn_v_all")
     with bb:
         none_v = st.button("해제", key="btn_v_none")
 
-    sel_videos = st.session_state.get("sel_videos", file_list.copy())
-    if all_v:  sel_videos = file_list.copy()
-    if none_v: sel_videos = []
+    sel_videos = st.session_state.get("sel_videos", default_video_sel)
+    if all_v:
+        sel_videos = file_list.copy()
+    if none_v:
+        sel_videos = []
     sel_videos = st.multiselect(
-        "영상 선택", options=file_list, default=sel_videos,
-        label_visibility="collapsed", help="표시할 영상을 선택합니다."
+        "영상 선택",
+        options=file_list,
+        default=sel_videos,
+        label_visibility="collapsed",
+        help="표시할 영상을 선택합니다.",
     )
     st.session_state.sel_videos = sel_videos
 
-    # 후보 객체 (라벨/시간 필터 제거)
-    candidate_objs = [t for t in objects_catalog if t["file"] in sel_videos]
+    selected_objs = [t for t in objects_catalog if t["file"] in sel_videos]
 
-    # 검색만 유지
-    st.write("**객체 목록**")
-    q = st.text_input("영상/객체/레이블 검색", value="", placeholder="예: 603, #2, 돌고래")
-    if q.strip():
-        qq = q.strip().lower()
-        candidate_objs = [
-            t for t in candidate_objs
-            if (qq in t["file"].lower() or qq in f"#{t['obj_id']}".lower() or qq in (t.get("label","") or "").lower())
-        ]
-
-    # 표시 옵션
-    def _obj_label(t: Dict[str, Any]) -> str:
-        lab = f"{t['file']} | 객체 #{t['obj_id']}"
-        if t.get("label"):
-            lab += f" — {t['label']}"
-        return lab
-
-    obj_options = [_obj_label(t) for t in candidate_objs]
-    if "sel_objects" not in st.session_state:
-        st.session_state.sel_objects = obj_options.copy()
-    st.session_state.sel_objects = [x for x in st.session_state.sel_objects if x in obj_options]
-
-    c3, c4, _sp2 = st.columns([8, 8, 12], gap="small")
-    with c3:
-        if st.button("객체 전체 선택"):
-            st.session_state.sel_objects = obj_options.copy()
-    with c4:
-        if st.button("객체 선택 해제"):
-            st.session_state.sel_objects = []
-
-    sel_objects = st.multiselect(
-        "객체 선택", options=obj_options, default=st.session_state.sel_objects,
-        label_visibility="collapsed", help="표시할 객체를 선택합니다."
-    )
-    st.session_state.sel_objects = sel_objects
-
-    # 간단 메트릭
-    m1, m2 = st.columns(2)
-    m1.metric("선택한 영상", f"{len(sel_videos)} / {total_files}")
-    m2.metric("선택한 객체", f"{len(sel_objects)} / {total_objects}")
-
-    selected_stats_objs = [t for t in candidate_objs if _obj_label(t) in sel_objects]
-    if selected_stats_objs:
-        size_vals = [float(t["size_cm"]) for t in selected_stats_objs if _is_number(t.get("size_cm"))]
-        heading_vals = [float(t["bearing_deg"]) for t in selected_stats_objs if _is_number(t.get("bearing_deg"))]
-        duration_vals = [float(t["t_dur_s"]) for t in selected_stats_objs if _is_number(t.get("t_dur_s"))]
-        snapshot_total = sum(len(t.get("snapshot_images") or []) for t in selected_stats_objs)
-        avg_size = _format_float(sum(size_vals) / len(size_vals), 1, " cm") if size_vals else "—"
-        avg_heading = _format_float(sum(heading_vals) / len(heading_vals), 1, "°") if heading_vals else "—"
-        avg_duration = _format_float(sum(duration_vals) / len(duration_vals), 1, "초") if duration_vals else "—"
-        st.markdown(
-            """
-            <div style="padding:10px 12px;margin-top:8px;border:1px solid #e5e7eb;border-radius:8px;background:#f8fafc;">
-              <div style="font-weight:600;margin-bottom:6px;">선택 객체 통계</div>
-              <ul style="margin:0;padding-left:18px;font-size:14px;line-height:1.7;">
-                <li>스냅샷 수: <b>{snapshots}</b></li>
-                <li>평균 탐지 지속 시간: <b>{avg_duration}</b></li>
-                <li>평균 추정 크기: <b>{avg_size}</b></li>
-                <li>평균 추정 헤딩: <b>{avg_heading}</b></li>
-              </ul>
-            </div>
-            """.format(
-                snapshots=snapshot_total,
-                avg_duration=avg_duration,
-                avg_size=avg_size,
-                avg_heading=avg_heading,
-            ),
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-    base_tile = st.selectbox("지도 배경", ["Carto Light", "OpenStreetMap", "Esri World Imagery"], index=0)
-
-# ---- 우측: 지도 + 아래 3열 ----
-with col_main:
-    if not st.session_state.sel_objects:
-        st.info("표시할 객체가 없습니다. 왼쪽에서 영상과 객체를 선택하세요.")
+    st.markdown("### 영상 당 객체 수")
+    if sel_videos:
+        counts_html = ["<table style='width:100%;font-size:14px;line-height:1.6;border-collapse:collapse;'>"]
+        counts_html.append("<thead><tr><th style='text-align:left;padding:4px 0;'>영상</th><th style='text-align:right;padding:4px 0;'>객체 수</th></tr></thead>")
+        counts_html.append("<tbody>")
+        for fname in sel_videos:
+            cnt = sum(1 for t in selected_objs if t["file"] == fname)
+            counts_html.append(
+                f"<tr><td style='padding:2px 0;border-bottom:1px solid #e5e7eb;'>{html.escape(fname)}</td>"
+                f"<td style='padding:2px 0;border-bottom:1px solid #e5e7eb;text-align:right;'>{cnt}</td></tr>"
+            )
+        counts_html.append("</tbody></table>")
+        st.markdown("".join(counts_html), unsafe_allow_html=True)
     else:
-        # 매핑
-        def _obj_label(t: Dict[str, Any]) -> str:
-            lab = f"{t['file']} | 객체 #{t['obj_id']}"
-            if t.get("label"):
-                lab += f" — {t['label']}"
-            return lab
-        label_to_obj = { _obj_label(t): t for t in objects_catalog }
-        objs_to_draw = [label_to_obj[n] for n in st.session_state.sel_objects if n in label_to_obj]
+        st.caption("선택된 영상이 없습니다.")
 
-        # 지도
-        m = build_map(objs_to_draw, base_tile=base_tile)
+    st.markdown("### 총 객체 수")
+    st.metric("총 객체 수", f"{len(selected_objs):,}")
+
+    st.divider()
+
+    st.markdown("### 범례")
+    legend_items = []
+    for obj in selected_objs:
+        legend_items.append(
+            f"""<div style="display:flex;align-items:center;gap:8px;margin:4px 0;">
+                    <span style="display:inline-block;width:16px;height:16px;border-radius:3px;border:1px solid #e5e7eb;background:{obj['color']};"></span>
+                    <span style="font-weight:500;font-size:15px;">객체 #{obj['obj_id']}</span>
+                    <span style="color:#6b7280;font-size:14px;">| {html.escape(obj['file'])}</span>
+                </div>"""
+        )
+    if legend_items:
+        st.markdown(f"<div class='legend-box'>{''.join(legend_items)}</div>", unsafe_allow_html=True)
+    else:
+        st.caption("표시할 객체가 없습니다.")
+
+    st.divider()
+
+    st.markdown("### 내보내기")
+    if selected_objs:
+        export_df = make_csv(selected_objs)
+        st.download_button(
+            label="⬇️ CSV",
+            data=export_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="objects_selection.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    else:
+        st.caption("선택된 객체가 없어 내보내기 버튼이 비활성화됩니다.")
+
+    st.divider()
+
+    base_tile = st.selectbox(
+        "지도 배경",
+        ["Carto Light", "OpenStreetMap", "Esri World Imagery"],
+        index=0,
+    )
+
+# ---- 우측: 지도 ----
+with col_main:
+    if not selected_objs:
+        st.info("표시할 객체가 없습니다. 왼쪽에서 영상을 선택하세요.")
+    else:
+        m = build_map(selected_objs, base_tile=base_tile)
         if m is None:
             st.warning("선택된 객체에 좌표 정보가 없어 지도를 생성할 수 없습니다.")
             st.stop()
-        map_out = st_folium(m, width=None, height=MAP_HEIGHT)
-
-        st.markdown("---")
-        cL, cE = st.columns([0.45, 0.55], gap="large")
-
-        # Legend (고정 높이 + 스크롤)
-        with cL:
-            st.markdown("### 범례")
-            items_html = []
-            for name in st.session_state.sel_objects:
-                t = label_to_obj.get(name)
-                if not t: continue
-                c = t["color"]
-                items_html.append(
-                    f"""<div style="display:flex;align-items:center;gap:8px;margin:4px 0;">
-                            <span style="display:inline-block;width:16px;height:16px;border-radius:3px;border:1px solid #e5e7eb;background:{c}"></span>
-                            <span style="font-weight:500; font-size:15px">객체 #{t['obj_id']}</span>
-                            <span style="color:#6b7280;font-size:14px">| {t['file']}</span>
-                        </div>"""
-                )
-            if items_html:
-                st.markdown(f"<div class='legend-box'>{''.join(items_html)}</div>", unsafe_allow_html=True)
-            else:
-                st.caption("선택된 객체가 없습니다.")
-
-        # Export (가로 버튼)
-        with cE:
-            st.markdown("### 내보내기")
-            if st.session_state.sel_objects:
-                export_objs = [label_to_obj[n] for n in st.session_state.sel_objects if n in label_to_obj]
-                df = make_csv(export_objs)
-                gj = make_geojson(export_objs)
-                b1, b2, _space = st.columns([3, 5, 10], gap="small")
-                with b1:
-                    st.download_button(
-                        label="⬇️ CSV",
-                        data=df.to_csv(index=False).encode("utf-8-sig"),
-                        file_name="objects_selection.csv",
-                        mime="text/csv"
-                    )
-                with b2:
-                    st.download_button(
-                        label="⬇️ GeoJSON",
-                        data=json.dumps(gj, ensure_ascii=False).encode("utf-8"),
-                        file_name="objects_selection.geojson",
-                        mime="application/geo+json"
-                    )
-            else:
-                st.caption("선택된 객체가 없어 내보내기 버튼이 비활성화됩니다.")
+        st_folium(m, width=None, height=MAP_HEIGHT)
