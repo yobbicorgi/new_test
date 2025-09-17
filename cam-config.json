@@ -1,0 +1,8 @@
+{
+    "vfov_deg": 39.6,
+    "hfov_deg": 53.1,   
+    "sensor_width_mm": 17.3, 
+    "sensor_height_mm": 13.0,
+    "focal_length_mm": 15.0, 
+    "camera_model": "DJI Zenmuse X5S"
+}

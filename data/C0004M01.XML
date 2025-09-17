@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<NonRealTimeMeta xmlns="urn:schemas-professionalDisc:nonRealTimeMeta:ver.2.00" xmlns:lib="urn:schemas-professionalDisc:lib:ver.2.00" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" lastUpdate="2024-10-11T09:29:05+09:00">
+	<TargetMaterial umidRef="060A2B340101010501010D43130000006E792B65940506CAA0C9A0FFFE304A6B"/>
+	<Duration value="1150140"/>
+	<LtcChangeTable tcFps="30" halfStep="true">
+		<LtcChange frameCount="0" value="61340016" status="increment"/>
+		<LtcChange frameCount="1150139" value="66A22021" status="end"/>
+	</LtcChangeTable>
+	<CreationDate value="2024-10-11T09:29:05+09:00"/>
+	<VideoFormat>
+		<VideoRecPort port="DIRECT"/>
+		<VideoFrame videoCodec="AVC_1920_1080_HP@L42" captureFps="59.94p" formatFps="59.94p"/>
+		<VideoLayout pixel="1920" numOfVerticalLine="1080" aspectRatio="16:9"/>
+	</VideoFormat>
+	<AudioFormat numOfChannel="2">
+		<AudioRecPort port="DIRECT" audioCodec="LPCM16" trackDst="CH1"/>
+		<AudioRecPort port="DIRECT" audioCodec="LPCM16" trackDst="CH2"/>
+	</AudioFormat>
+	<Device manufacturer="Sony" modelName="HXR-NX80" serialNo="1000499"/>
+	<RecordingMode type="normal" cacheRec="false"/>
+	<AcquisitionRecord>
+		<Group name="CameraUnitMetadataSet">
+			<Item name="CaptureGammaEquation" value="rec709"/>
+			<Item name="CaptureColorPrimaries" value="rec709"/>
+			<Item name="CodingEquations" value="rec709"/>
+		</Group>
+	</AcquisitionRecord>
+</NonRealTimeMeta>
