@@ -26,6 +26,7 @@ import cv2
 import math
 import numpy as np
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, Any, List, Optional, Set, Tuple
 from tqdm import tqdm
 import supervision as sv
@@ -45,6 +46,7 @@ META_DIR          = Path("metadata")
 DATA_DIR          = Path("data")
 CAM_CONFIG_PATH   = Path("cam-config.json")
 RUN_MAIN_FIRST    = True
+TRACK_ID_STATE_PATH = META_DIR / "_object_id_state.json"
 
 # 초당 저장할 스냅샷 수 (예: 1 → 초당 1장, 2 → 초당 2장)
 SNAPSHOT_FREQ     = 2
@@ -91,6 +93,119 @@ def _median(xs: List[Optional[float]]):
     ys.sort()
     n = len(ys); i = n // 2
     return ys[i] if n % 2 == 1 else 0.5 * (ys[i-1] + ys[i])
+
+def _load_next_track_id() -> int:
+    if not TRACK_ID_STATE_PATH.exists():
+        return 1
+    try:
+        data = json.loads(TRACK_ID_STATE_PATH.read_text(encoding="utf-8"))
+        val = int(data.get("next_id", 1))
+        if val < 1:
+            return 1
+        return val
+    except Exception:
+        return 1
+
+def _save_next_track_id(next_id: int) -> None:
+    value = int(next_id) if isinstance(next_id, (int, float)) else 1
+    if value < 1:
+        value = 1
+    payload = {
+        "next_id": int(value),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    _write_json(TRACK_ID_STATE_PATH, payload)
+
+
+def _normalize_angle_deg(val: Any) -> Optional[float]:
+    try:
+        ang = float(val)
+    except Exception:
+        return None
+    if not math.isfinite(ang):
+        return None
+    ang = ang % 360.0
+    if ang < 0:
+        ang += 360.0
+    return ang
+
+
+def _resolve_true_north_cw_deg(meta: Dict[str, Any], cam_cfg: Optional[Dict[str, Any]]) -> float:
+    """Return clockwise angle (degrees) from image up to true north."""
+
+    def _from_dict(d: Optional[Dict[str, Any]], keys: List[str]) -> Optional[float]:
+        if d is None:
+            return None
+        cur: Any = d
+        for key in keys[:-1]:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(key)
+        if not isinstance(cur, dict):
+            return None
+        return cur.get(keys[-1])
+
+    def _candidate_values() -> List[Any]:
+        vals: List[Any] = []
+        # Metadata candidates (nested dictionaries)
+        nested_paths = [
+            ["image_orientation", "true_north_cw_deg"],
+            ["image_orientation", "true_north_deg"],
+            ["image_orientation", "true_north_offset_deg"],
+            ["image_orientation", "true_north_ccw_deg"],
+            ["camera", "true_north_cw_deg"],
+            ["camera", "true_north_offset_deg"],
+            ["camera", "true_north_ccw_deg"],
+            ["video", "true_north_cw_deg"],
+            ["video", "true_north_offset_deg"],
+            ["video", "true_north_ccw_deg"],
+            ["detections", "true_north_cw_deg"],
+            ["detections", "image_true_north_cw_deg"],
+        ]
+        for path in nested_paths:
+            val = _from_dict(meta, path)
+            if val is not None:
+                vals.append((path[-1], val))
+        if isinstance(meta, dict):
+            for key in [
+                "image_true_north_cw_deg",
+                "image_true_north_deg",
+                "true_north_cw_deg",
+                "true_north_offset_deg",
+                "true_north_ccw_deg",
+            ]:
+                if key in meta:
+                    vals.append((key, meta.get(key)))
+        if isinstance(cam_cfg, dict):
+            for key in [
+                "image_true_north_cw_deg",
+                "image_true_north_deg",
+                "true_north_cw_deg",
+                "true_north_offset_deg",
+                "image_north_cw_deg",
+                "north_cw_deg",
+                "image_orientation_cw_deg",
+                "orientation_cw_deg",
+                "true_north_ccw_deg",
+                "image_true_north_ccw_deg",
+            ]:
+                if key in cam_cfg:
+                    vals.append((key, cam_cfg.get(key)))
+        return vals
+
+    for key_name, raw in _candidate_values():
+        if raw is None:
+            continue
+        ang = None
+        if "ccw" in key_name.lower():
+            val = _normalize_angle_deg(raw)
+            if val is not None:
+                ang = (-val) % 360.0
+        else:
+            ang = _normalize_angle_deg(raw)
+        if ang is not None:
+            return ang
+    return 0.0
 
 # ========= 카메라 설정 =========
 def load_camera_config(cfg_path: Optional[Path]) -> Dict[str, Any]:
@@ -250,9 +365,10 @@ def color_from_track_id(track_id: int) -> sv.Color:
 def run_detection_for_video(
     vpath: Path,
     model: YOLO,
+    start_track_id: int = 1,
     show_window: bool = SHOW_WINDOW_DEFAULT,
     snap_freq: int = SNAPSHOT_FREQ,
-):
+) -> Tuple[List[Dict[str, Any]], sv.VideoInfo, Dict[int, List[str]], int]:
     fname = vpath.name
     stem  = vpath.stem
 
@@ -286,7 +402,12 @@ def run_detection_for_video(
     trace_by_id: Dict[int, sv.TraceAnnotator] = {}
     label_by_id: Dict[int, sv.LabelAnnotator] = {}
     display_id_by_track: Dict[int, int] = {}
-    next_display_id = 1
+    try:
+        next_display_id = int(start_track_id)
+    except Exception:
+        next_display_id = 1
+    if next_display_id < 1:
+        next_display_id = 1
 
     # 트랙 요약 집계용(프레임 단위)
     track_db: Dict[int, Dict[str, Any]] = {}
@@ -546,7 +667,7 @@ def run_detection_for_video(
         cv2.destroyAllWindows()
 
     # class_counts는 build_and_inject_tracks 안에서 "1초 이상" 트랙 기준으로 재계산
-    return det_rows, info, snapshots_filtered
+    return det_rows, info, snapshots_filtered, next_display_id
 
 # ========== Image (slice-only) ==========
 def run_detection_for_image(ipath: Path, model: YOLO):
@@ -732,6 +853,16 @@ def build_and_inject_tracks(meta_path: Path,
         print(f"[WARN] metadata not found: {meta_path}")
         return
     meta = _read_json(meta_path)
+
+    north_cw_deg = _resolve_true_north_cw_deg(meta, cam_cfg)
+    theta = math.radians(north_cw_deg)
+    sin_t = math.sin(theta)
+    cos_t = math.cos(theta)
+    # Image basis (up/right) expressed in world (east/north) coordinates
+    u_e = -sin_t   # east component of image-up vector
+    u_n = cos_t    # north component of image-up vector
+    r_e = u_n      # east component of image-right vector
+    r_n = -u_e     # north component of image-right vector
 
     snap_map: Dict[str, List[str]] = {}
     if snapshots_by_track:
@@ -944,9 +1075,13 @@ def build_and_inject_tracks(meta_path: Path,
             if E_p is None or N_p is None:
                 continue
 
-            dx_px = rel_x*width; dy_px = rel_y*height
-            east_m  = dx_px * gsd_v
-            north_m = -dy_px * gsd_v
+            dx_px = rel_x * width
+            dy_px = rel_y * height
+            dx_m = dx_px * gsd_v
+            dy_m = dy_px * gsd_v
+
+            east_m = dx_m * r_e - dy_m * u_e
+            north_m = dx_m * r_n - dy_m * u_n
 
             E_obj = E_p + east_m
             N_obj = N_p + north_m
@@ -1120,6 +1255,7 @@ def build_and_inject_tracks(meta_path: Path,
 
     # ---- 주입/저장 ----
     meta.setdefault("detections", {})
+    meta["detections"]["image_true_north_cw_deg"] = _round_or_none(north_cw_deg, 6)
     meta["detections"].update({
         "class_counts": class_counts,
         "tracks": tracks_out
@@ -1148,6 +1284,7 @@ video_exts = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 image_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
 items = sorted([p for p in SOURCE_DIR.iterdir() if p.is_file()])
+next_track_id = _load_next_track_id()
 
 for path in items:
     ext = path.suffix.lower()
@@ -1155,7 +1292,12 @@ for path in items:
     meta_path = META_DIR / f"{stem}.json"
 
     if ext in video_exts:
-        det_rows, info, snapshots_by_track = run_detection_for_video(path, model, show_window=SHOW_WINDOW_DEFAULT)
+        det_rows, info, snapshots_by_track, next_track_id = run_detection_for_video(
+            path,
+            model,
+            start_track_id=next_track_id,
+            show_window=SHOW_WINDOW_DEFAULT,
+        )
         duration_s = (info.total_frames / info.fps) if (info.total_frames and info.fps) else None
         build_and_inject_tracks(
             meta_path=meta_path,
@@ -1166,6 +1308,7 @@ for path in items:
             duration_s=duration_s,
             snapshots_by_track=snapshots_by_track,
         )
+        _save_next_track_id(next_track_id)
     elif ext in image_exts:
         img_info = run_detection_for_image(path, model)
         # 이미지도 metadata 주입 (tracks=[] 포함)
