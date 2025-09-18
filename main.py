@@ -1029,11 +1029,9 @@ def build_and_inject_tracks(meta_path: Path,
 
         # 경로(객체 좌표만)
         path_coords: List[Dict[str, Any]] = []   # [{t, lat, lon, clock_*}]
-        # 속도/방향 계산용 EN 시퀀스(객체/항공기)
+        # 속도/방향 계산용 EN 시퀀스(객체)
         E_obj_seq: List[float] = []
         N_obj_seq: List[float] = []
-        E_plane_seq: List[float] = []
-        N_plane_seq: List[float] = []
         T_seq: List[float] = []
 
         # 크기/스냅샷 대표 산출용
@@ -1102,7 +1100,6 @@ def build_and_inject_tracks(meta_path: Path,
             })
 
             E_obj_seq.append(E_obj); N_obj_seq.append(N_obj)
-            E_plane_seq.append(E_p); N_plane_seq.append(N_p)
             T_seq.append(t)
 
             mj = r.get("major_axis_px")
@@ -1123,10 +1120,8 @@ def build_and_inject_tracks(meta_path: Path,
                 continue
             dE_obj = E_obj_seq[i] - E_obj_seq[i-1]
             dN_obj = N_obj_seq[i] - N_obj_seq[i-1]
-            dE_plane = E_plane_seq[i] - E_plane_seq[i-1]
-            dN_plane = N_plane_seq[i] - N_plane_seq[i-1]
-            dE = dE_obj - dE_plane
-            dN = dN_obj - dN_plane
+            dE = dE_obj
+            dN = dN_obj
             d  = math.hypot(dE, dN)
             if d <= 1e-6:
                 continue
