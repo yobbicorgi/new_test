@@ -26,6 +26,7 @@ import cv2
 import math
 import numpy as np
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, Any, List, Optional, Set, Tuple
 from tqdm import tqdm
 import supervision as sv
@@ -45,6 +46,7 @@ META_DIR          = Path("metadata")
 DATA_DIR          = Path("data")
 CAM_CONFIG_PATH   = Path("cam-config.json")
 RUN_MAIN_FIRST    = True
+TRACK_ID_STATE_PATH = META_DIR / "_object_id_state.json"
 
 # 초당 저장할 스냅샷 수 (예: 1 → 초당 1장, 2 → 초당 2장)
 SNAPSHOT_FREQ     = 2
@@ -91,6 +93,28 @@ def _median(xs: List[Optional[float]]):
     ys.sort()
     n = len(ys); i = n // 2
     return ys[i] if n % 2 == 1 else 0.5 * (ys[i-1] + ys[i])
+
+def _load_next_track_id() -> int:
+    if not TRACK_ID_STATE_PATH.exists():
+        return 1
+    try:
+        data = json.loads(TRACK_ID_STATE_PATH.read_text(encoding="utf-8"))
+        val = int(data.get("next_id", 1))
+        if val < 1:
+            return 1
+        return val
+    except Exception:
+        return 1
+
+def _save_next_track_id(next_id: int) -> None:
+    value = int(next_id) if isinstance(next_id, (int, float)) else 1
+    if value < 1:
+        value = 1
+    payload = {
+        "next_id": int(value),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    _write_json(TRACK_ID_STATE_PATH, payload)
 
 # ========= 카메라 설정 =========
 def load_camera_config(cfg_path: Optional[Path]) -> Dict[str, Any]:
@@ -250,9 +274,10 @@ def color_from_track_id(track_id: int) -> sv.Color:
 def run_detection_for_video(
     vpath: Path,
     model: YOLO,
+    start_track_id: int = 1,
     show_window: bool = SHOW_WINDOW_DEFAULT,
     snap_freq: int = SNAPSHOT_FREQ,
-):
+) -> Tuple[List[Dict[str, Any]], sv.VideoInfo, Dict[int, List[str]], int]:
     fname = vpath.name
     stem  = vpath.stem
 
@@ -286,7 +311,12 @@ def run_detection_for_video(
     trace_by_id: Dict[int, sv.TraceAnnotator] = {}
     label_by_id: Dict[int, sv.LabelAnnotator] = {}
     display_id_by_track: Dict[int, int] = {}
-    next_display_id = 1
+    try:
+        next_display_id = int(start_track_id)
+    except Exception:
+        next_display_id = 1
+    if next_display_id < 1:
+        next_display_id = 1
 
     # 트랙 요약 집계용(프레임 단위)
     track_db: Dict[int, Dict[str, Any]] = {}
@@ -546,7 +576,7 @@ def run_detection_for_video(
         cv2.destroyAllWindows()
 
     # class_counts는 build_and_inject_tracks 안에서 "1초 이상" 트랙 기준으로 재계산
-    return det_rows, info, snapshots_filtered
+    return det_rows, info, snapshots_filtered, next_display_id
 
 # ========== Image (slice-only) ==========
 def run_detection_for_image(ipath: Path, model: YOLO):
@@ -1148,6 +1178,7 @@ video_exts = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 image_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
 items = sorted([p for p in SOURCE_DIR.iterdir() if p.is_file()])
+next_track_id = _load_next_track_id()
 
 for path in items:
     ext = path.suffix.lower()
@@ -1155,7 +1186,12 @@ for path in items:
     meta_path = META_DIR / f"{stem}.json"
 
     if ext in video_exts:
-        det_rows, info, snapshots_by_track = run_detection_for_video(path, model, show_window=SHOW_WINDOW_DEFAULT)
+        det_rows, info, snapshots_by_track, next_track_id = run_detection_for_video(
+            path,
+            model,
+            start_track_id=next_track_id,
+            show_window=SHOW_WINDOW_DEFAULT,
+        )
         duration_s = (info.total_frames / info.fps) if (info.total_frames and info.fps) else None
         build_and_inject_tracks(
             meta_path=meta_path,
@@ -1166,6 +1202,7 @@ for path in items:
             duration_s=duration_s,
             snapshots_by_track=snapshots_by_track,
         )
+        _save_next_track_id(next_track_id)
     elif ext in image_exts:
         img_info = run_detection_for_image(path, model)
         # 이미지도 metadata 주입 (tracks=[] 포함)

@@ -941,17 +941,17 @@ with col_ctrl:
 
     selected_objs = [t for t in objects_catalog if t["file"] in sel_videos]
 
-    st.markdown("#### 🧮 영상 당 객체 수")
+    st.markdown("#### 🧮 영상 별 객체 수")
     if sel_videos:
         counts_html = ["<table style='width:100%;font-size:14px;line-height:1.6;border-collapse:collapse;'>"]
-        counts_html.append("<thead><tr><th style='text-align:left;padding:4px 0;'>영상</th><th style='text-align:right;padding:4px 0;'>객체 수</th></tr></thead>")
+        counts_html.append("<thead><tr><th style='text-align:center;padding:4px 0;'>영상</th><th style='text-align:center;padding:4px 0;'>객체 수</th></tr></thead>")
         counts_html.append("<tbody>")
         for fname in sel_videos:
             cnt = sum(1 for t in selected_objs if t["file"] == fname)
             display_name = html.escape(file_display_lookup.get(fname, fname))
             counts_html.append(
-                f"<tr><td style='padding:2px 0;border-bottom:1px solid #e5e7eb;'>{display_name}</td>"
-                f"<td style='padding:2px 0;border-bottom:1px solid #e5e7eb;text-align:right;'>{cnt}</td></tr>"
+                f"<tr><td style='padding:2px 0;border-bottom:1px solid #e5e7eb;text-align:center;'>{display_name}</td>"
+                f"<td style='padding:2px 0;border-bottom:1px solid #e5e7eb;text-align:center;'>{cnt}</td></tr>"
             )
         counts_html.append("</tbody></table>")
         st.markdown("".join(counts_html), unsafe_allow_html=True)
