@@ -46,7 +46,7 @@ META_DIR          = Path("metadata")
 DATA_DIR          = Path("data")
 CAM_CONFIG_PATH   = Path("cam-config.json")
 RUN_MAIN_FIRST    = True
-TRACK_ID_STATE_PATH = META_DIR / "_object_id_state.json"
+TRACK_ID_STATE_PATH = Path(__file__).resolve().parent / "_object_id_state.json"
 
 # 초당 저장할 스냅샷 수 (예: 1 → 초당 1장, 2 → 초당 2장)
 SNAPSHOT_FREQ     = 2
@@ -128,6 +128,79 @@ def _normalize_angle_deg(val: Any) -> Optional[float]:
     if ang < 0:
         ang += 360.0
     return ang
+
+
+def _angular_diff_deg(a: float, b: float) -> float:
+    try:
+        diff = (float(a) - float(b)) % 360.0
+    except Exception:
+        return float("inf")
+    if diff > 180.0:
+        diff -= 360.0
+    return abs(diff)
+
+
+def _axis_mean_deg(angles: List[float]) -> Optional[float]:
+    vals: List[float] = []
+    for a in angles:
+        try:
+            ang = float(a) % 360.0
+        except Exception:
+            continue
+        if not math.isfinite(ang):
+            continue
+        vals.append(ang)
+    if not vals:
+        return None
+
+    cos_sum = 0.0
+    sin_sum = 0.0
+    for ang in vals:
+        rad2 = math.radians(ang * 2.0)
+        cos_sum += math.cos(rad2)
+        sin_sum += math.sin(rad2)
+    if abs(cos_sum) < 1e-9 and abs(sin_sum) < 1e-9:
+        return None
+    mean_rad = 0.5 * math.atan2(sin_sum, cos_sum)
+    mean_deg = (math.degrees(mean_rad)) % 180.0
+
+    candidates = [mean_deg % 360.0, (mean_deg + 180.0) % 360.0]
+    best = None
+    best_score = None
+    for cand in candidates:
+        score = sum(_angular_diff_deg(ang, cand) for ang in vals)
+        if best_score is None or score < best_score:
+            best = cand
+            best_score = score
+    if best is None:
+        return None
+    return best % 360.0
+
+
+def _mask_major_axis_direction(mask: Optional[np.ndarray]) -> Optional[Tuple[float, float]]:
+    if mask is None:
+        return None
+    try:
+        mask_arr = np.asarray(mask)
+        ys, xs = np.nonzero(mask_arr)
+        if len(xs) < 2:
+            return None
+        pts = np.stack([xs.astype(np.float64), ys.astype(np.float64)], axis=1)
+        pts -= pts.mean(axis=0, keepdims=True)
+        cov = np.cov(pts, rowvar=False)
+        if cov.shape != (2, 2):
+            return None
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        idx = int(np.argmax(eigvals))
+        vec = eigvecs[:, idx]
+        dx = float(vec[0])
+        dy = float(vec[1])
+        norm = math.hypot(dx, dy)
+        if norm <= 1e-9:
+            return None
+        return (dx / norm, dy / norm)
+    except Exception:
+        return None
 
 
 def _resolve_true_north_cw_deg(meta: Dict[str, Any], cam_cfg: Optional[Dict[str, Any]]) -> float:
@@ -605,12 +678,17 @@ def run_detection_for_video(
                     x1, y1, x2, y2 = box_k.tolist()
                     w = x2 - x1; h = y2 - y1
                     cx = x1 + w/2.0; cy = y1 + h/2.0
+                    mask_major_dir = _mask_major_axis_direction(matched_masks[k]) if matched_masks[k] is not None else None
                     if matched_masks[k] is not None:
                         area_px = float(matched_masks[k].sum())
                     else:
                         area_px = float(w * h)
                     cname = cname_of(names, int(cls_k))
                     mask_poly = matched_polys[k].astype(float).tolist() if matched_polys[k] is not None else None
+                    if mask_major_dir is not None:
+                        major_axis_dir_image = [float(mask_major_dir[0]), float(mask_major_dir[1])]
+                    else:
+                        major_axis_dir_image = None
 
                     det_rows.append({
                         "track_id": int(display_tid),
@@ -621,6 +699,7 @@ def run_detection_for_video(
                         "cx": float(cx), "cy": float(cy), "w": float(w), "h": float(h),
                         "area_px": area_px,
                         "major_axis_px": float(max(w, h)),
+                        "major_axis_dir_image": major_axis_dir_image,
                         "bbox": [float(x1), float(y1), float(x2), float(y2)],
                         "mask_polygon": mask_poly
                     })
@@ -951,6 +1030,7 @@ def build_and_inject_tracks(meta_path: Path,
                 "t": k / freq,
                 "cx": b.get("cx"), "cy": b.get("cy"), "w": b.get("w"), "h": b.get("h"),
                 "area_px": b.get("area_px"), "major_axis_px": b.get("major_axis_px"),
+                "major_axis_dir_image": b.get("major_axis_dir_image"),
                 "bbox": b.get("bbox"), "mask_polygon": b.get("mask_polygon"),
                 "label": b.get("label")
             })
@@ -1038,6 +1118,8 @@ def build_and_inject_tracks(meta_path: Path,
         major_vals: List[float] = []
         gsd_vals: List[float] = []
         major_at_t: Dict[int, Dict[str, Any]] = {}
+        axis_angles: List[float] = []
+        axis_angle_samples: List[Dict[str, Any]] = []
 
         for r in per_sec:
             k = int(r["k"])
@@ -1098,6 +1180,29 @@ def build_and_inject_tracks(meta_path: Path,
                 "clock_time": plane.get("clock_time"),
                 "clock_iso": plane.get("clock_iso"),
             })
+
+            axis_dir = r.get("major_axis_dir_image")
+            if isinstance(axis_dir, (list, tuple)) and len(axis_dir) == 2:
+                try:
+                    dx_img = float(axis_dir[0])
+                    dy_img = float(axis_dir[1])
+                except Exception:
+                    dx_img = dy_img = None
+            else:
+                dx_img = dy_img = None
+            if dx_img is not None and dy_img is not None:
+                east_axis = dx_img * r_e - dy_img * u_e
+                north_axis = dx_img * r_n - dy_img * u_n
+                norm_axis = math.hypot(east_axis, north_axis)
+                if norm_axis > 1e-9:
+                    east_axis /= norm_axis
+                    north_axis /= norm_axis
+                    axis_ang = (math.degrees(math.atan2(east_axis, north_axis)) + 360.0) % 360.0
+                    axis_angles.append(axis_ang)
+                    axis_angle_samples.append({
+                        "t": _round_or_none(t, 3),
+                        "angle_deg": _round_or_none(axis_ang, 2),
+                    })
 
             E_obj_seq.append(E_obj); N_obj_seq.append(N_obj)
             T_seq.append(t)
@@ -1232,7 +1337,28 @@ def build_and_inject_tracks(meta_path: Path,
         if appearance_clock:
             appearance_info["clock"] = appearance_clock
         track_pairs.append(("appearance", appearance_info))
-        track_pairs.append(("heading_deg", _round_or_none(bearing_avg, 2)))
+
+        heading_axis_info = None
+        if axis_angles:
+            primary_axis = _axis_mean_deg(axis_angles)
+            if primary_axis is not None:
+                opposite_axis = (primary_axis + 180.0) % 360.0
+                heading_axis_info = OrderedDict([
+                    ("cw_from_true_north_deg", _round_or_none(primary_axis, 2)),
+                    ("cw_from_true_north_opposite_deg", _round_or_none(opposite_axis, 2)),
+                    ("sample_count", len(axis_angles)),
+                    ("samples_deg", [_round_or_none(a, 2) for a in axis_angles]),
+                    ("source", "mask_major_axis"),
+                ])
+                if axis_angle_samples:
+                    heading_axis_info["samples"] = axis_angle_samples
+
+        if heading_axis_info is not None:
+            track_pairs.append(("heading_axis_deg", heading_axis_info))
+            track_pairs.append(("heading_deg", heading_axis_info.get("cw_from_true_north_deg")))
+            track_pairs.append(("heading_deg_opposite", heading_axis_info.get("cw_from_true_north_opposite_deg")))
+        else:
+            track_pairs.append(("heading_deg", _round_or_none(bearing_avg, 2)))
         track_pairs.append(("size_major_axis_median_cm", size_cm_median))
         if size_ref_bbox or size_ref_maskpoly or size_ref_t is not None:
             track_pairs.append(("size_reference", {
