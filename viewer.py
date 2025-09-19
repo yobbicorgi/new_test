@@ -63,6 +63,79 @@ def _format_float(v: Optional[float], digits: int = 2, unit: str = "") -> str:
     except Exception:
         return str(v)
 
+
+def _angular_diff_deg(a: Any, b: Any) -> float:
+    try:
+        diff = (float(a) - float(b)) % 360.0
+    except Exception:
+        return float("inf")
+    if diff > 180.0:
+        diff -= 360.0
+    return abs(diff)
+
+
+def _extract_heading_info(raw: Any) -> Tuple[Optional[float], Optional[float], Optional[str], List[float]]:
+    values: List[float] = []
+
+    def _add(val: Any) -> None:
+        try:
+            ang = float(val) % 360.0
+        except Exception:
+            return
+        if not math.isfinite(ang):
+            return
+        for existing in values:
+            if _angular_diff_deg(existing, ang) < 1e-6:
+                return
+        values.append(ang)
+
+    if isinstance(raw, dict):
+        for key in [
+            "cw_from_true_north_deg",
+            "cw_from_true_north",
+            "primary",
+            "deg",
+            "value",
+        ]:
+            if raw.get(key) is not None:
+                _add(raw.get(key))
+        for key in [
+            "cw_from_true_north_opposite_deg",
+            "opposite",
+            "secondary",
+        ]:
+            if raw.get(key) is not None:
+                _add(raw.get(key))
+        for key in ["candidates", "values", "angles", "deg_values"]:
+            seq = raw.get(key)
+            if isinstance(seq, (list, tuple, set)):
+                for item in seq:
+                    _add(item)
+    elif isinstance(raw, (list, tuple, set)):
+        for item in raw:
+            _add(item)
+    else:
+        if raw is not None:
+            _add(raw)
+
+    if not values:
+        return (None, None, None, [])
+
+    primary = values[0]
+    opposite = None
+    for val in values[1:]:
+        if _angular_diff_deg((primary + 180.0) % 360.0, val) < 1.0:
+            opposite = val
+            break
+    if opposite is None:
+        opposite = (primary + 180.0) % 360.0
+
+    if opposite is not None:
+        text = f"{primary:.2f}° / {opposite:.2f}°"
+    else:
+        text = f"{primary:.2f}°"
+    return (primary, opposite, text, values)
+
 def _normalize_rel_image_path(value: Any) -> Optional[str]:
     """결과 이미지 폴더 기준 상대 경로를 '/' 구분자로 정규화."""
     if value is None:
@@ -462,8 +535,14 @@ def build_objects(records: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], 
             start = (a_lat, a_lon)
             end = None
 
-            bearing_raw = tr.get("heading_deg") if "heading_deg" in tr else tr.get("bearing_avg_deg")
-            bearing = float(bearing_raw) if _is_number(bearing_raw) else None
+            heading_primary, heading_opposite, heading_text, heading_values = _extract_heading_info(tr.get("heading_axis_deg"))
+            if heading_primary is None:
+                heading_primary, heading_opposite, heading_text, heading_values = _extract_heading_info(
+                    tr.get("heading_deg") if "heading_deg" in tr else None
+                )
+            if heading_primary is None:
+                heading_primary, heading_opposite, heading_text, heading_values = _extract_heading_info(tr.get("bearing_avg_deg"))
+            bearing = heading_primary
             size_raw = tr.get("size_major_axis_median_cm")
             size_cm = float(size_raw) if _is_number(size_raw) else None
 
@@ -477,7 +556,11 @@ def build_objects(records: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], 
                 "file": fname,
                 "video_file_name": video_file_name,
                 "obj_id": tid, "label": label, "color": color,
-                "bearing_deg": bearing, "size_cm": size_cm,
+                "bearing_deg": bearing,
+                "bearing_deg_opposite": heading_opposite,
+                "bearing_axis_text": heading_text,
+                "bearing_axis_candidates": heading_values,
+                "size_cm": size_cm,
                 "t_start_s": start_time, "t_end_s": end_time, "t_dur_s": duration_sec,
                 "coords": coords, "start": start, "end": end,
                 "preview_rel_path": preview_rel_path, "preview_img_name": preview_img_name,
@@ -521,7 +604,7 @@ def _popup_html(t: Dict[str, Any]) -> str:
     lat_dms = t.get("appearance_lat_dms") or "—"
     lon_dms = t.get("appearance_lon_dms") or "—"
     size_txt = _format_float(t.get("size_cm"), 1, " cm")
-    heading_txt = _format_float(t.get("bearing_deg"), 2, "°")
+    heading_txt = t.get("bearing_axis_text") or _format_float(t.get("bearing_deg"), 2, "°")
     video_name = t.get("video_file_name") or t["file"]
 
     img_line = ""
@@ -649,6 +732,12 @@ def make_csv(objs: List[Dict[str, Any]]) -> pd.DataFrame:
         video_time = _sec_to_hhmmss(t["t_start_s"])
         if video_time == "—":
             video_time = "Null"
+        if video_time not in ("Null", None):
+            video_time = f"'{video_time}"
+        heading_text = t.get("bearing_axis_text")
+        if not heading_text:
+            fallback_heading = _format_float(t.get("bearing_deg"), 2, "°")
+            heading_text = fallback_heading if fallback_heading != "—" else "Null"
         rows.append({
             "file": t.get("video_file_name") or t["file"],
             "object_id": t["obj_id"],
@@ -660,7 +749,7 @@ def make_csv(objs: List[Dict[str, Any]]) -> pd.DataFrame:
             "latitude_dms": t.get("appearance_lat_dms") or "",
             "longitude_dms": t.get("appearance_lon_dms") or "",
             "size(cm)": t.get("size_cm"),
-            "heading": t.get("bearing_deg"),
+            "heading": heading_text,
         })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -702,6 +791,9 @@ def make_geojson(objs: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "appearance_lat_dms": t.get("appearance_lat_dms"),
                 "appearance_lon_dms": t.get("appearance_lon_dms"),
                 "heading_deg": t.get("bearing_deg"),
+                "heading_deg_opposite": t.get("bearing_deg_opposite"),
+                "heading_axis_text": t.get("bearing_axis_text"),
+                "heading_axis_candidates": t.get("bearing_axis_candidates"),
                 "size_cm": t.get("size_cm"),
                 "t_start_s": t["t_start_s"],
                 "t_end_s": t["t_end_s"],
